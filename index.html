@@ -73,7 +73,7 @@
 <div id="start">
   <div class="intro">
     <h1>جزيئات وجهك 🙂✨</h1>
-    <p>9000 جزيء تتشكل على <b>وجهك</b> وتلبس ألوانه، وتتحرك معك: ترمش، تبتسم، تلف راسك. وبيدك تقدر تلفها وتكبرها وتبدل لـ 23 شكل ثاني، منها أشكال البعد الرابع.</p>
+    <p>18000 جزيء تتشكل على <b>وجهك</b> وتلبس ألوانه، وتتحرك معك: ترمش، تبتسم، تلف راسك. وبيدك تقدر تلفها وتكبرها وتبدل لـ 23 شكل ثاني، منها أشكال البعد الرابع.</p>
     <button id="startBtn">ابدأ الكاميرا</button>
     <div id="status">يحتاج إذن الكاميرا · الصورة ما تطلع من جهازك</div>
     <p class="alt"><a href="https://abdulkarim551155-pixel.github.io/hand-particles/">جرّب كمان: جزيئات اليد ✋</a></p>
@@ -85,7 +85,7 @@ import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.m
 import { FilesetResolver, HandLandmarker, FaceLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 // ===================== 1) مشهد Three.js =====================
-const COUNT = 9000;
+const COUNT = 18000;                      // عدد الجزيئات
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, innerWidth / Math.max(1, innerHeight), 0.1, 500);
 camera.position.z = 60;
@@ -361,7 +361,7 @@ SHAPES.unshift({ name: "وجهي 🙂", hue: 0.55, still: true, face: true, make
 
 let faceLandmarker = null;
 const DEPTH = 1.6;                                    // نكبّر العمق شوي عشان تبان التضاريس
-const EYE_N = 110, MOUTH_N = 260, TONGUE_N = 900;     // لكل عين، الفم من جوا، اللسان
+const EYE_N = 200, MOUTH_N = 500, TONGUE_N = 1500;     // لكل عين، الفم من جوا، اللسان
 const SURFACE_N = COUNT - EYE_N * 2 - MOUTH_N - TONGUE_N;
 const MOUTH_START = SURFACE_N + EYE_N * 2, TONGUE_START = MOUTH_START + MOUTH_N;
 const INNER_LIPS = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95];
@@ -523,7 +523,7 @@ function showShape() {
   const s = SHAPES[shapeIndex];
   document.getElementById("shapeName").textContent = `${s.name} (${shapeIndex + 1}/${SHAPES.length})`;
   document.getElementById("shapeName").style.color = new THREE.Color().setHSL(s.hue, 0.85, 0.68).getStyle();
-  material.size = s.face ? 0.45 : 0.7;          // جزيئات الوجه أصغر عشان تبان التفاصيل
+  material.size = s.face ? 0.34 : 0.55;          // جزيئات الوجه أصغر عشان تبان التفاصيل
 }
 function changeShape(i) { _setShape((i + SHAPES.length) % SHAPES.length); showShape(); }
 showShape();

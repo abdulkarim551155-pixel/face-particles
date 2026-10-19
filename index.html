@@ -351,8 +351,8 @@ function point(i) {
 
 // ---------- شكل «وجهي»: نسخة 3D من وجهك بالجزيئات ----------
 // MediaPipe يعطينا 478 نقطة في الوجه مع العمق (z). نحولها لسطح من مثلثات،
-// ونفرش الجزيئات عليه بالتساوي. البارز (الأنف، الخدود) يطلع لقدام،
-// والغاير (العيون، الفم) يدخل لورا، والإضاءة توضح التضاريس.
+// ونفرش الجزيئات عليه بالتساوي. البارز (الأنف، الخدود) يطلع لقدام ويتنور،
+// والغاير (العيون، الفم) يدخل لورا ويغمق. وخطوط خفيفة بنفس اللون ترسم الملامح.
 SHAPES.unshift({ name: "وجهي 🙂", hue: 0.55, still: true, face: true, make(i) {
   // قبل ما يبان وجهك: بيضة مكان الوجه
   const y = 1 - (i / (COUNT - 1)) * 2, r = Math.sqrt(1 - y * y), t = i * 2.39996;
@@ -360,15 +360,22 @@ SHAPES.unshift({ name: "وجهي 🙂", hue: 0.55, still: true, face: true, make
 }});
 
 let faceLandmarker = null;
-const DEPTH = 1.6;                                    // نكبّر العمق شوي عشان تبان التضاريس
-const EYE_N = 200, MOUTH_N = 500, TONGUE_N = 1500;     // لكل عين، الفم من جوا، اللسان
-const SURFACE_N = COUNT - EYE_N * 2 - MOUTH_N - TONGUE_N;
-const MOUTH_START = SURFACE_N + EYE_N * 2, TONGUE_START = MOUTH_START + MOUTH_N;
-const INNER_LIPS = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95];
+const DEPTH = 1.8;                                    // نكبّر العمق شوي عشان تبان التضاريس
+const EYE_N = 160, TONGUE_N = 1500;
+const LINE_N = Math.round(COUNT * 0.22);              // جزيئات خطوط الملامح
+const SURFACE_N = COUNT - LINE_N - EYE_N * 2 - TONGUE_N;
+const LINE_START = SURFACE_N, EYE_START = LINE_START + LINE_N, TONGUE_START = EYE_START + EYE_N * 2;
+// الأنف: MediaPipe ما يعطي خطوطه، فنرسمها من أرقام النقاط
+const NOSE_EDGES = [[168, 6], [6, 197], [197, 195], [195, 5], [5, 4], [4, 1], [1, 2],
+  [2, 97], [97, 98], [98, 64], [2, 326], [326, 327], [327, 294], [98, 129], [327, 358]]
+  .map(([start, end]) => ({ start, end }));
+// [المجموعة، نسبتها من جزيئات الخطوط]
+const LINE_PARTS = [["LIPS", 0.24], ["LEFT_EYE", 0.12], ["RIGHT_EYE", 0.12], ["LEFT_EYEBROW", 0.1],
+  ["RIGHT_EYEBROW", 0.1], ["LEFT_IRIS", 0.05], ["RIGHT_IRIS", 0.05], ["NOSE", 0.12], ["FACE_OVAL", 0.1]];
 
 let tris = null;                                      // مثلثات سطح الوجه
-const pTri = new Uint16Array(COUNT);                  // كل جزيء: أي مثلث
-const pU = new Float32Array(COUNT), pV = new Float32Array(COUNT);   // ومكانه داخل المثلث
+const pTri = new Uint16Array(COUNT), pA = new Uint16Array(COUNT), pB = new Uint16Array(COUNT);
+const pU = new Float32Array(COUNT), pV = new Float32Array(COUNT);
 const baseCol = new Float32Array(COUNT * 3);
 let eyeL = null, eyeR = null, smooth = null;
 
@@ -398,52 +405,73 @@ function prepareFace(L, ax) {
   tris = buildTriangles();
   eyeL = ring(FaceLandmarker.FACE_LANDMARKS_LEFT_EYE, L);
   eyeR = ring(FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE, L);
-  // نوزع جزيئات السطح على المثلثات حسب مساحتها، عشان تكون متساوية
+  // كل مثلث ياخذ عدد جزيئات حسب مساحته (توزيع منتظم بدل عشوائي = صورة أنظف)
   const area = tris.map(([a, b, c]) => Math.abs(((L[b].x - L[a].x) * ax) * (L[c].y - L[a].y) - ((L[c].x - L[a].x) * ax) * (L[b].y - L[a].y)));
-  const total = area.reduce((s, v) => s + v, 0), cum = [];
-  area.reduce((s, v, j) => (cum[j] = s + v), 0);
-  const col = new THREE.Color();
-  for (let i = 0; i < COUNT; i++) {
-    if (i < SURFACE_N) {
-      const r = Math.random() * total;
-      let lo = 0, hi = cum.length - 1;
-      while (lo < hi) { const m = (lo + hi) >> 1; if (cum[m] < r) lo = m + 1; else hi = m; }
-      pTri[i] = lo;
-    } else pTri[i] = Math.random() * 64;             // للعيون والفم: رقم القطعة
+  const total = area.reduce((s, v) => s + v, 0);
+  let i = 0, acc = 0;
+  for (let t = 0; t < tris.length && i < SURFACE_N; t++) {
+    acc += area[t] / total * SURFACE_N;
+    for (let j = 0; i < Math.round(acc) && i < SURFACE_N; i++, j++) {
+      // تسلسل R2: نقاط موزعة بانتظام داخل المثلث
+      let u = (0.5 + (j + 1) * 0.7548776662) % 1, v = (0.5 + (j + 1) * 0.5698402910) % 1;
+      if (u + v > 1) { u = 1 - u; v = 1 - v; }
+      pTri[i] = t; pU[i] = u; pV[i] = v;
+    }
+  }
+  for (; i < SURFACE_N; i++) { pTri[i] = (Math.random() * tris.length) | 0; pU[i] = Math.random() * 0.5; pV[i] = Math.random() * 0.5; }
+  // خطوط الملامح
+  for (const [name, share] of LINE_PARTS) {
+    const edges = name === "NOSE" ? NOSE_EDGES : FaceLandmarker["FACE_LANDMARKS_" + name];
+    const n = Math.round(LINE_N * share);
+    for (let j = 0; j < n && i < EYE_START; j++, i++) {
+      const e = edges[(Math.random() * edges.length) | 0];
+      pA[i] = e.start; pB[i] = e.end; pU[i] = Math.random();
+    }
+  }
+  for (; i < EYE_START; i++) { const e = FaceLandmarker.FACE_LANDMARKS_LIPS[0]; pA[i] = e.start; pB[i] = e.end; pU[i] = Math.random(); }
+  // العيون من جوا
+  for (; i < TONGUE_START; i++) {
+    pTri[i] = (Math.random() * 64) | 0;
     let u = Math.random(), v = Math.random();
-    if (u + v > 1) { u = 1 - u; v = 1 - v; }         // نقطة عشوائية داخل المثلث
+    if (u + v > 1) { u = 1 - u; v = 1 - v; }
     pU[i] = u; pV[i] = v;
-    col.setHSL(0.55 + rnd(-0.03, 0.03), 0.9, rnd(0.45, 0.7));   // نفس لون أشكال اليد
-    baseCol.set([col.r, col.g, col.b], i * 3);
+  }
+  for (; i < COUNT; i++) { pU[i] = Math.random(); pV[i] = Math.random(); }
+  const col = new THREE.Color();
+  for (let k = 0; k < COUNT; k++) {
+    col.setHSL(0.55 + rnd(-0.025, 0.025), 0.9, rnd(0.5, 0.68));   // نفس لون أشكال اليد
+    baseCol.set([col.r, col.g, col.b], k * 3);
   }
 }
 
-// ---------- اكتشاف اللسان (من اللون تحت الفم) ----------
+// ---------- اكتشاف اللسان (من اللون تحت الشفة) ----------
 const sampler = document.createElement("canvas"); sampler.width = 320; sampler.height = 240;
 const sctx = sampler.getContext("2d", { willReadFrequently: true });
 let tonguePts = [];
 
 function findTongue(lm, src, eyeDist) {
   const open = (lm[14].y - lm[13].y) / eyeDist;
-  if (open < 0.05) { tonguePts = []; return; }
+  if (open < 0.08) { tonguePts = []; return; }
   const W = 320, H = 240;
   sctx.drawImage(src, 0, 0, W, H);
-  const x0 = Math.min(lm[61].x, lm[291].x), x1 = Math.max(lm[61].x, lm[291].x), pad = (x1 - x0) * 0.15;
-  const rx0 = Math.max(0, ((x0 - pad) * W) | 0), rx1 = Math.min(W - 1, ((x1 + pad) * W) | 0);
+  const x0 = Math.min(lm[61].x, lm[291].x), x1 = Math.max(lm[61].x, lm[291].x);
+  const rx0 = Math.max(0, (x0 * W) | 0), rx1 = Math.min(W - 1, (x1 * W) | 0);
   // نبدأ من تحت الشفة السفلية: الشفايف نفسها حمرا فما نبيها تنحسب لسان
   const ry0 = Math.max(0, ((lm[17].y + 0.004) * H) | 0), ry1 = Math.min(H - 1, ((lm[152].y + 0.02) * H) | 0);
   if (rx1 <= rx0 || ry1 <= ry0) { tonguePts = []; return; }
   const img = sctx.getImageData(rx0, ry0, rx1 - rx0 + 1, ry1 - ry0 + 1), d = img.data, w = img.width;
-  const cheek = (p) => sctx.getImageData((p.x * W) | 0, (p.y * H) | 0, 1, 1).data;
-  const c1 = cheek(lm[50]), c2 = cheek(lm[280]);
-  const skinRatio = ((c1[0] + c2[0]) / 2 + 1) / ((c1[1] + c2[1]) / 2 + 1);
+  // لون البشرة: من الخدود ومن الذقن
+  const px = (p) => sctx.getImageData((p.x * W) | 0, (p.y * H) | 0, 1, 1).data;
+  const refs = [px(lm[50]), px(lm[280]), px(lm[199])];
+  const skinRatio = refs.reduce((s, c) => s + (c[0] + 1) / (c[1] + 1), 0) / refs.length;
   const pts = [];
   for (let y = 0; y < img.height; y++) for (let x = 0; x < w; x++) {
     const p = (y * w + x) * 4, r = d[p], g = d[p + 1], b = d[p + 2];
-    if (r + g + b < 120) continue;
-    if ((r + 1) / (g + 1) > skinRatio * 1.22 && r > b * 1.05) pts.push([(rx0 + x + 0.5) / W, (ry0 + y + 0.5) / H]);
+    if (r < 90) continue;                             // ظل أو ظلام
+    if ((r + 1) / (g + 1) > skinRatio * 1.35 && r - g > 45 && r > b * 1.1) pts.push([(rx0 + x + 0.5) / W, (ry0 + y + 0.5) / H]);
   }
-  tonguePts = pts.length > 25 ? pts : [];
+  // لازم يكون اللسان كبير كفاية (مو كم بكسل من ظل أو شفة)
+  tonguePts = pts.length > img.width * img.height * 0.08 ? pts : [];
 }
 
 function updateFace(lm, src = video, vw = video.videoWidth || 640, vh = video.videoHeight || 480) {
@@ -459,8 +487,11 @@ function updateFace(lm, src = video, vw = video.videoWidth || 640, vh = video.vi
   const S = 13 / Math.hypot((L[263].x - L[33].x) * ax, L[263].y - L[33].y);
   const cx = L[168].x, cy = L[168].y + (L[152].y - L[10].y) * 0.12;
   const X = (x) => -(x - cx) * S * ax, Y = (y) => -(y - cy) * S, Z = (z) => -z * S * ax * DEPTH;
+  // العمق: الأقرب (طرف الخشم) أفتح، والأبعد (أطراف الوجه) أغمق
+  const zNear = Z(L[1].z), zFar = Z(L[234].z) - 1;
+  const depthLight = (z) => 0.55 + 0.6 * Math.min(1, Math.max(0, (z - zFar) / (zNear - zFar)));
 
-  // إضاءة: كل مثلث يتنور حسب اتجاهه (الضوء جاي من قدام وفوق)
+  // إضاءة جانبية: كل مثلث يتنور حسب اتجاهه، فتبان التضاريس
   const shade = new Float32Array(tris.length);
   for (let t = 0; t < tris.length; t++) {
     const [a, b, c] = tris[t], A = L[a], B = L[b], C = L[c];
@@ -468,14 +499,15 @@ function updateFace(lm, src = video, vw = video.videoWidth || 640, vh = video.vi
     const vx = X(C.x) - X(A.x), vy = Y(C.y) - Y(A.y), vz = Z(C.z) - Z(A.z);
     let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
     const len = Math.hypot(nx, ny, nz) || 1; nx /= len; ny /= len; nz /= len;
-    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }     // الوجه يطالعك
-    shade[t] = 0.25 + 0.95 * Math.max(0, nx * -0.25 + ny * 0.45 + nz * 0.86);
+    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    shade[t] = 0.22 + 1.15 * Math.pow(Math.max(0, nx * -0.45 + ny * 0.5 + nz * 0.74), 1.4);
   }
 
   const put = (i, x, y, z, light) => {
-    const k = i * 3;
-    targets[k] = X(x); targets[k + 1] = Y(y); targets[k + 2] = Z(z);
-    colors[k] = baseCol[k] * light; colors[k + 1] = baseCol[k + 1] * light; colors[k + 2] = baseCol[k + 2] * light;
+    const k = i * 3, wz = Z(z);
+    targets[k] = X(x); targets[k + 1] = Y(y); targets[k + 2] = wz;
+    const l = light * depthLight(wz);
+    colors[k] = baseCol[k] * l; colors[k + 1] = baseCol[k + 1] * l; colors[k + 2] = baseCol[k + 2] * l;
   };
 
   // 1) سطح الوجه
@@ -483,31 +515,33 @@ function updateFace(lm, src = video, vw = video.videoWidth || 640, vh = video.vi
     const [a, b, c] = tris[pTri[i]], A = L[a], B = L[b], C = L[c], u = pU[i], v = pV[i], w = 1 - u - v;
     put(i, A.x * w + B.x * u + C.x * v, A.y * w + B.y * u + C.y * v, A.z * w + B.z * u + C.z * v, shade[pTri[i]]);
   }
-  // 2) العيون والفم: نعبي الفتحة ونرجعها لورا (غايرة)
+  // 2) خطوط الملامح (نفس اللون، أوضح شوي)
+  for (let i = LINE_START; i < EYE_START; i++) {
+    const A = L[pA[i]], B = L[pB[i]], t = pU[i];
+    put(i, A.x + (B.x - A.x) * t, A.y + (B.y - A.y) * t, A.z + (B.z - A.z) * t - 0.002, 0.8);
+  }
+  // 3) العيون من جوا: غايرة وغامقة
   const fill = (from, n, ids, sink, light) => {
     let mx = 0, my = 0, mz = 0;
     for (const j of ids) { mx += L[j].x; my += L[j].y; mz += L[j].z; }
     mx /= ids.length; my /= ids.length; mz /= ids.length;
     for (let i = from; i < from + n; i++) {
       const s = pTri[i] % ids.length, P = L[ids[s]], Q = L[ids[(s + 1) % ids.length]], u = pU[i], v = pV[i], w = 1 - u - v;
-      const edge = u + v;                             // 0 في النص، 1 على الحافة
-      put(i, mx * w + P.x * u + Q.x * v, my * w + P.y * u + Q.y * v, mz + sink * (1 - edge), light);
+      put(i, mx * w + P.x * u + Q.x * v, my * w + P.y * u + Q.y * v, mz + sink * (1 - u - v), light);
     }
   };
-  fill(SURFACE_N, EYE_N, eyeL, 0.012, 0.4);
-  fill(SURFACE_N + EYE_N, EYE_N, eyeR, 0.012, 0.4);
-  const open = (L[14].y - L[13].y) / eyeDistN;
-  // الفم مسكّر: جزيئاته تختفي. مفتوح: تعبّي الفتحة وتدخل لورا حسب كم هو مفتوح
-  fill(MOUTH_START, MOUTH_N, INNER_LIPS, Math.min(0.06, open * 0.25), open > 0.05 ? Math.min(0.35, open * 2) : 0);
+  fill(EYE_START, EYE_N, eyeL, 0.012, 0.2);
+  fill(EYE_START + EYE_N, EYE_N, eyeR, 0.012, 0.2);
+  // الفم: ما نعبيه. لما تفتحه يصير فتحة سودا، والشفايف ترسمه
 
-  // 3) اللسان
+  // 4) اللسان
   findTongue(L, src, eyeDistN);
   const n = tonguePts.length, lipZ = L[14].z, lipY = L[14].y;
   for (let i = TONGUE_START; i < COUNT; i++) {
     const k = i * 3;
     if (!n) { put(i, L[14].x, L[14].y, L[14].z, 0); continue; }   // ما فيه لسان: تختفي
     const [px, py] = tonguePts[(i * 7919) % n];
-    put(i, px + (pU[i] - 0.5) / 320, py + (pV[i] - 0.5) / 320, lipZ, 0.9);
+    put(i, px + (pU[i] - 0.5) / 320, py + (pV[i] - 0.5) / 320, lipZ, 0.8);
     targets[k + 2] = Z(lipZ) + Math.max(0, py - lipY) * S * 0.9 + 1.5;     // يطلع لقدام
   }
   geometry.attributes.color.needsUpdate = true;

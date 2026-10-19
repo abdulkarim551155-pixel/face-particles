@@ -531,13 +531,20 @@ function updateFace(lm, src = video, vw = video.videoWidth || 640, vh = video.vi
   fill(EYE_START, EYE_N, eyeL, 0.008, 0.4);
   fill(EYE_START + EYE_N, EYE_N, eyeR, 0.008, 0.4);
   // الحدقة: دايرة حقيقية (مو مربع): حلقة لامعة وبؤبؤ غامق في النص
+  // الجفن: الجزء من الحدقة اللي فوق الجفن العلوي أو تحت السفلي ما يبان، ولما تغمض تختفي كلها
+  const LIDS = [[159, 145], [386, 374]];             // [الجفن العلوي، السفلي] لكل عين
   for (let e = 0; e < 2; e++) {
     const [c0, ...rim] = IRIS[e], C = L[c0];
     const rad = rim.reduce((s, j) => s + Math.hypot((L[j].x - C.x) * ax, L[j].y - C.y), 0) / 4;
+    // نلقى جفون نفس العين (الأقرب للحدقة)
+    const [up, lo] = LIDS.reduce((best, p) => Math.abs(L[p[0]].x - C.x) < Math.abs(L[best[0]].x - C.x) ? p : best);
+    const top = L[up].y, bottom = L[lo].y, opened = (bottom - top) > rad * 0.35;
     for (let i = IRIS_START + e * IRIS_N; i < IRIS_START + (e + 1) * IRIS_N; i++) {
       const a = pU[i] * Math.PI * 2, rr = Math.sqrt(pV[i]);
-      const light = rr < 0.42 ? 0.06 : rr > 0.85 ? 1.25 : 0.85;
-      put(i, C.x + Math.cos(a) * rr * rad / ax, C.y + Math.sin(a) * rr * rad, C.z - 0.004, light);
+      const x = C.x + Math.cos(a) * rr * rad / ax, y = C.y + Math.sin(a) * rr * rad;
+      const visible = opened && y > top && y < bottom;
+      const light = !visible ? 0 : rr < 0.42 ? 0.06 : rr > 0.85 ? 1.25 : 0.85;
+      put(i, x, visible ? y : Math.min(Math.max(y, top), bottom), C.z - 0.004, light);
     }
   }
   // الفم: ما نعبيه. لما تفتحه يصير فتحة سودا، والشفايف ترسمه

@@ -65,7 +65,7 @@
     ✋ <b>كف مفتوح</b> = تلفّ الشكل<br>
     👌 <b>قرصة</b> = الشكل التالي<br>
     ✌️ <b>علامة النصر</b> = الشكل السابق<br>
-    🙂 <b>«وجهي»</b> = الجزيئات تصير وجهك: جرّب تطلع لسانك 😛<br>
+    🙂 <b>«وجهي»</b> = الجزيئات ترسم ملامحك: جرّب تفتح فمك وتطلع لسانك 😛<br>
     🙌 <b>يدين</b>: بعّدهم = يكبر، قرّبهم = يصغر، ميّلهم = يدور
   </details>
 </div>
@@ -82,12 +82,12 @@
 
 <script type="module">
 import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
-import { FilesetResolver, HandLandmarker, FaceLandmarker, ImageSegmenter } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { FilesetResolver, HandLandmarker, FaceLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 // ===================== 1) مشهد Three.js =====================
 const COUNT = 9000;
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500);
+const camera = new THREE.PerspectiveCamera(60, innerWidth / Math.max(1, innerHeight), 0.1, 500);
 camera.position.z = 60;
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -349,58 +349,131 @@ function point(i) {
   P[0] = x2 * p; P[1] = y * p; P[2] = z2 * p;
 }
 
-// ---------- شكل «وجهي»: الجزيئات تصير صورة 3D حية لوجهك ----------
-// الفكرة: نقص مربع حول وجهك من الكاميرا، ونقسمه شبكة 94×94. كل جزيء = بكسل،
-// ياخذ لونه، ويطلع لقدام حسب شكل الراس. فأي شي في وجهك (لسانك، عيونك، شعرك) يبان.
-const GRID = 94;
-SHAPES.unshift({ name: "وجهي 🙂", hue: 0.08, still: true, face: true, make(i) {
-  // قبل ما تشتغل الكاميرا: شبكة مقوسة مكان الوجه
-  const gx = i % GRID, gy = (i / GRID) | 0, u = (gx + 0.5) / GRID - 0.5, v = (gy + 0.5) / GRID - 0.5;
-  return [-u * 36, -v * 36, Math.sqrt(Math.max(0, 0.3 - u * u - v * v * 0.8)) * 22];
+// ---------- شكل «وجهي»: الجزيئات ترسم ملامح وجهك وتتحرك معه ----------
+// MediaPipe يعطينا 478 نقطة في الوجه. نوزع الجزيئات على خطوط الملامح:
+// شبكة الوجه خفيفة، والعيون والحواجب والشفايف وحدقة العين واضحة بألوانها،
+// واللسان نكتشفه من لون البكسلات تحت الفم.
+SHAPES.unshift({ name: "وجهي 🙂", hue: 0.5, still: true, face: true, make(i) {
+  // قبل ما يبان وجهك: بيضة مكان الوجه
+  const y = 1 - (i / (COUNT - 1)) * 2, r = Math.sqrt(1 - y * y), t = i * 2.39996;
+  return [Math.cos(t) * r * 12, y * 16, Math.sin(t) * r * 8];
 }});
 
-let faceLandmarker = null, segmenter = null;
-let roi = null;                               // مربع حول الوجه: مركزه (0..1) وطوله بالبكسل
-let mask = null, maskW = 0, maskH = 0;        // قناع الشخص من نموذج الفصل (عشان نشيل الخلفية)
-const sampler = document.createElement("canvas"); sampler.width = sampler.height = GRID;
-const sctx = sampler.getContext("2d", { willReadFrequently: true });
+let faceLandmarker = null;
+// [اسم المجموعة، عدد الجزيئات، اللون (hue, sat, light)، السماكة]
+const FACE_PARTS = [
+  ["TESSELATION",   3500, [0.53, 0.55, 0.30], 0.05],   // شبكة الوجه كله
+  ["NOSE",           400, [0.58, 0.45, 0.62], 0.07],   // الأنف (خط الأنف وفتحاته)
+  ["FACE_OVAL",      700, [0.53, 0.80, 0.55], 0.12],   // حدود الوجه
+  ["LIPS",          1100, [0.97, 0.80, 0.58], 0.10],   // الشفايف
+  ["LEFT_EYE",       450, [0.52, 0.30, 0.80], 0.06],
+  ["RIGHT_EYE",      450, [0.52, 0.30, 0.80], 0.06],
+  ["LEFT_EYEBROW",   300, [0.09, 0.75, 0.58], 0.12],
+  ["RIGHT_EYEBROW",  300, [0.09, 0.75, 0.58], 0.12],
+  ["LEFT_IRIS",      250, [0.47, 1.00, 0.62], 0.05],   // حدقة العين
+  ["RIGHT_IRIS",     250, [0.47, 1.00, 0.62], 0.05],
+];
+const TONGUE_COUNT = COUNT - FACE_PARTS.reduce((n, p) => n + p[1], 0);   // الباقي (1300) للسان
+const TONGUE_START = COUNT - TONGUE_COUNT;
+const pA = new Uint16Array(COUNT), pB = new Uint16Array(COUNT), pT = new Float32Array(COUNT);
+const jit = new Float32Array(COUNT * 3), baseCol = new Float32Array(COUNT * 3);
+let facePrepared = false, smooth = null;
+// MediaPipe ما يعطي خطوط للأنف، فنرسمها من أرقام النقاط بنفسنا
+const NOSE_EDGES = [[168, 6], [6, 197], [197, 195], [195, 5], [5, 4], [4, 1], [1, 19], [19, 94], [94, 2],
+  [2, 97], [97, 98], [98, 64], [64, 102], [2, 326], [326, 327], [327, 294], [294, 331],
+  [98, 129], [327, 358], [4, 45], [4, 275], [45, 220], [275, 440]].map(([start, end]) => ({ start, end }));
 
-// من نقاط الوجه نعرف وين الوجه ونرسم مربع أكبر منه شوي (يدخل فيه اللسان والذقن والشعر)
-function updateRoi(lm, vw, vh) {
-  let minX = 1, maxX = 0, minY = 1, maxY = 0;
-  for (const p of lm) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
-  const h = maxY - minY;
-  const next = { cx: (minX + maxX) / 2, cy: minY + h * 0.58, s: Math.max((maxX - minX) * vw, h * vh) * 1.6 };
-  if (!roi) roi = next;
-  else for (const k in next) roi[k] += (next[k] - roi[k]) * 0.35;   // تنعيم عشان ما يرجف
+function prepareFace() {
+  const col = new THREE.Color();
+  let i = 0;
+  for (const [name, n, [h, s, l], thick] of FACE_PARTS) {
+    const edges = name === "NOSE" ? NOSE_EDGES : FaceLandmarker["FACE_LANDMARKS_" + name];
+    for (let j = 0; j < n; j++, i++) {
+      const e = edges[(Math.random() * edges.length) | 0];
+      pA[i] = e.start; pB[i] = e.end; pT[i] = Math.random();
+      jit[i * 3] = rnd(-thick, thick); jit[i * 3 + 1] = rnd(-thick, thick); jit[i * 3 + 2] = rnd(-thick, thick);
+      col.setHSL(h + rnd(-0.02, 0.02), s, l * rnd(0.85, 1.15));
+      baseCol.set([col.r, col.g, col.b], i * 3);
+    }
+  }
+  for (; i < COUNT; i++) {                          // اللسان: وردي
+    col.setHSL(0.96 + rnd(-0.02, 0.02), 0.85, rnd(0.55, 0.7));
+    baseCol.set([col.r, col.g, col.b], i * 3);
+    jit[i * 3] = rnd(0, 1); jit[i * 3 + 1] = rnd(0, 1); jit[i * 3 + 2] = rnd(-0.3, 0.3);
+  }
+  facePrepared = true;
 }
 
-function updateFacePixels(src = video, vw = video.videoWidth, vh = video.videoHeight) {
-  if (!roi || !vw || !(roi.s > 0)) return;
-  const sx = roi.cx * vw - roi.s / 2, sy = roi.cy * vh - roi.s / 2;
-  sctx.clearRect(0, 0, GRID, GRID);
-  sctx.drawImage(src, sx, sy, roi.s, roi.s, 0, 0, GRID, GRID);
-  const px = sctx.getImageData(0, 0, GRID, GRID).data;
-  // رقم «الشخص» في القناع = الرقم اللي في نص الوجه
-  const at = (x, y) => mask[Math.min(maskH - 1, (y * maskH) | 0) * maskW + Math.min(maskW - 1, (x * maskW) | 0)];
-  const person = mask ? at(roi.cx, roi.cy) : 0;
-  for (let i = 0; i < COUNT; i++) {
-    const k = i * 3;
-    if (i >= GRID * GRID) { colors[k] = colors[k + 1] = colors[k + 2] = 0; continue; }
-    const gx = i % GRID, gy = (i / GRID) | 0, u = (gx + 0.5) / GRID, v = (gy + 0.5) / GRID;
-    const vx = (sx + u * roi.s) / vw, vy = (sy + v * roi.s) / vh;
-    let inside = vx >= 0 && vx < 1 && vy >= 0 && vy < 1;
-    if (inside) inside = mask ? at(vx, vy) === person
-                              : ((u - 0.5) ** 2) / 0.17 + ((v - 0.5) ** 2) / 0.24 < 1;   // بدون قناع: بيضاوي
-    const p = (gy * GRID + gx) * 4, r = px[p] / 255, g = px[p + 1] / 255, b = px[p + 2] / 255;
-    const du = u - 0.5, dv = v - 0.5;
-    targets[k] = -du * 36;                                     // سالب = مراية
-    targets[k + 1] = -dv * 36;
-    targets[k + 2] = Math.sqrt(Math.max(0, 0.3 - du * du - dv * dv * 0.8)) * 22   // تقويسة الراس
-                   + (0.3 * r + 0.59 * g + 0.11 * b) * 4;                          // الفاتح يطلع لقدام شوي
-    const m = inside ? 1.25 : 0;                               // الخلفية = أسود = تختفي
-    colors[k] = Math.min(1, r * m); colors[k + 1] = Math.min(1, g * m); colors[k + 2] = Math.min(1, b * m);
+// ---------- اكتشاف اللسان ----------
+// نقص منطقة الفم والذقن من الكاميرا، ونقارن لون كل بكسل بلون خدك:
+// اللسان أحمر/وردي أكثر من البشرة بشكل واضح.
+const sampler = document.createElement("canvas"); sampler.width = 320; sampler.height = 240;
+const sctx = sampler.getContext("2d", { willReadFrequently: true });
+let tonguePts = [];
+
+function findTongue(lm, src, eyeDist) {
+  const open = (lm[14].y - lm[13].y) / eyeDist;          // كم الفم مفتوح
+  if (open < 0.05) { tonguePts = []; return; }
+  const W = 320, H = 240;
+  sctx.drawImage(src, 0, 0, W, H);
+  const x0 = Math.min(lm[61].x, lm[291].x), x1 = Math.max(lm[61].x, lm[291].x), pad = (x1 - x0) * 0.15;
+  const rx0 = Math.max(0, ((x0 - pad) * W) | 0), rx1 = Math.min(W - 1, ((x1 + pad) * W) | 0);
+  const ry0 = Math.max(0, (lm[13].y * H) | 0), ry1 = Math.min(H - 1, ((lm[152].y + 0.02) * H) | 0);
+  if (rx1 <= rx0 || ry1 <= ry0) { tonguePts = []; return; }
+  const img = sctx.getImageData(rx0, ry0, rx1 - rx0 + 1, ry1 - ry0 + 1), d = img.data, w = img.width;
+  // لون الخد (مرجع البشرة)
+  const cheek = (p) => { const c = sctx.getImageData((p.x * W) | 0, (p.y * H) | 0, 1, 1).data; return c; };
+  const c1 = cheek(lm[50]), c2 = cheek(lm[280]);
+  const skinRatio = ((c1[0] + c2[0]) / 2 + 1) / ((c1[1] + c2[1]) / 2 + 1);
+  const pts = [];
+  for (let y = 0; y < img.height; y++) for (let x = 0; x < w; x++) {
+    const p = (y * w + x) * 4, r = d[p], g = d[p + 1], b = d[p + 2];
+    if (r + g + b < 120) continue;                     // ظلام الفم
+    if ((r + 1) / (g + 1) > skinRatio * 1.22 && r > b * 1.05)
+      pts.push([(rx0 + x + 0.5) / W, (ry0 + y + 0.5) / H]);
   }
+  tonguePts = pts.length > 25 ? pts : [];
+}
+
+function updateFace(lm, src = video, vw = video.videoWidth || 640, vh = video.videoHeight || 480) {
+  if (!facePrepared) prepareFace();
+  // تنعيم الرجفة
+  if (!smooth) smooth = lm.map((p) => ({ ...p }));
+  for (let j = 0; j < lm.length; j++) {
+    smooth[j].x += (lm[j].x - smooth[j].x) * 0.55;
+    smooth[j].y += (lm[j].y - smooth[j].y) * 0.55;
+    smooth[j].z += (lm[j].z - smooth[j].z) * 0.55;
+  }
+  const L = smooth, ax = vw / vh;
+  // الحجم من المسافة بين العينين (ما تتغير لما تفتح فمك)، والمركز عند الأنف
+  const eyeDist = Math.hypot((L[263].x - L[33].x) * ax, L[263].y - L[33].y);
+  const S = 13 / eyeDist, cx = L[168].x, cy = L[168].y + (L[152].y - L[10].y) * 0.12;
+  const X = (x) => -(x - cx) * S * ax, Y = (y) => -(y - cy) * S, Z = (z) => -z * S * ax;
+
+  for (let i = 0; i < TONGUE_START; i++) {
+    const a = L[pA[i]], b = L[pB[i]], t = pT[i], k = i * 3;
+    targets[k] = X(a.x + (b.x - a.x) * t) + jit[k];
+    targets[k + 1] = Y(a.y + (b.y - a.y) * t) + jit[k + 1];
+    targets[k + 2] = Z(a.z + (b.z - a.z) * t) + jit[k + 2];
+  }
+
+  findTongue(L, src, Math.hypot((L[263].x - L[33].x), L[263].y - L[33].y));
+  const n = tonguePts.length, lipZ = L[14].z, lipY = L[14].y;
+  for (let i = TONGUE_START; i < COUNT; i++) {
+    const k = i * 3;
+    if (!n) {                                           // ما فيه لسان: الجزيئات تنضم للشفة وتختفي
+      targets[k] = X(L[14].x); targets[k + 1] = Y(L[14].y); targets[k + 2] = Z(L[14].z);
+      colors[k] = colors[k + 1] = colors[k + 2] = 0;
+      continue;
+    }
+    const [px, py] = tonguePts[(i * 7919) % n];
+    const cell = 1 / 320;
+    const x = px + (jit[k] - 0.5) * cell, y = py + (jit[k + 1] - 0.5) * cell;
+    targets[k] = X(x); targets[k + 1] = Y(y);
+    targets[k + 2] = Z(lipZ) + Math.max(0, y - lipY) * S * 0.9 + 1.5 + jit[k + 2];   // اللسان يطلع لقدام
+    colors[k] = baseCol[k]; colors[k + 1] = baseCol[k + 1]; colors[k + 2] = baseCol[k + 2];
+  }
+  for (let k = 0; k < TONGUE_START * 3; k++) colors[k] = baseCol[k];
   geometry.attributes.color.needsUpdate = true;
 }
 
@@ -414,7 +487,7 @@ function showShape() {
   const s = SHAPES[shapeIndex];
   document.getElementById("shapeName").textContent = `${s.name} (${shapeIndex + 1}/${SHAPES.length})`;
   document.getElementById("shapeName").style.color = new THREE.Color().setHSL(s.hue, 0.85, 0.68).getStyle();
-  material.size = s.face ? 0.8 : 0.7;          // جزيئات الوجه أصغر عشان تبان التفاصيل
+  material.size = s.face ? 0.5 : 0.7;          // جزيئات الوجه أصغر عشان تبان التفاصيل
 }
 function changeShape(i) { _setShape((i + SHAPES.length) % SHAPES.length); showShape(); }
 showShape();
@@ -455,18 +528,6 @@ async function start() {
       .then((f) => { faceLandmarker = f; })
       .catch((err) => console.error("face model:", err));
 
-    // نموذج يفصل الشخص عن الخلفية، عشان يبان وجهك ولسانك وشعرك بس
-    const segOpts = (delegate) => ({
-      baseOptions: {
-        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
-        delegate,
-      },
-      runningMode: "VIDEO", outputCategoryMask: true, outputConfidenceMasks: false,
-    });
-    ImageSegmenter.createFromOptions(files, segOpts("GPU"))
-      .catch(() => ImageSegmenter.createFromOptions(files, segOpts("CPU")))
-      .then((sg) => { segmenter = sg; })
-      .catch((err) => console.error("segmenter:", err));
 
     status.textContent = "جاري فتح الكاميرا...";
     video.srcObject = await navigator.mediaDevices.getUserMedia({
@@ -555,7 +616,7 @@ function worldHalf() {
   return { halfW: halfH * camera.aspect, halfH };
 }
 // حجم يدخل الشاشة: الأشكال عرضها ~40 وحدة، نصغّرها في الشاشات الطولية
-function fitScale() { return Math.min(1, (worldHalf().halfW * 0.85) / 20); }
+function fitScale() { const f = Math.min(1, (worldHalf().halfW * 0.85) / 20); return f > 0 ? f : 1; }
 
 const LABEL = { open: "✋ تلفّ", fist: "✊ تحريك", pinch: "👌 قرصة", peace: "✌️ نصر", other: "…", none: "" };
 
@@ -636,20 +697,10 @@ function animate() {
   if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
     frameNo++;
-    // في شكل «وجهي» نوزع اللقطات عشان الجوال ما يثقل:
-    // لقطتين لصورة الوجه، لقطة لمكان الوجه، لقطة لليدين
-    const step = frameNo % 4;
-    if (SHAPES[shapeIndex].face && faceLandmarker && step !== 3) {
-      if (step === 1 || !roi) {
-        const face = faceLandmarker.detectForVideo(video, now).faceLandmarks[0];
-        if (face) updateRoi(face, video.videoWidth, video.videoHeight);
-      } else {
-        if (segmenter) segmenter.segmentForVideo(video, now, (res) => {
-          const m = res.categoryMask;
-          maskW = m.width; maskH = m.height; mask = m.getAsUint8Array().slice();
-        });
-        updateFacePixels();
-      }
+    // في شكل «وجهي»: الوجه كل لقطة تقريباً، واليدين كل ثالث لقطة
+    if (SHAPES[shapeIndex].face && faceLandmarker && frameNo % 3 !== 0) {
+      const face = faceLandmarker.detectForVideo(video, now).faceLandmarks[0];
+      if (face) updateFace(face);
     } else {
       const res = landmarker.detectForVideo(video, now);
       updateHands(res.landmarks);
@@ -692,17 +743,18 @@ function animate() {
     velocities[k + 2] += (gz - positions[k + 2]) * 0.03;
     velocities[k] *= 0.82; velocities[k + 1] *= 0.82; velocities[k + 2] *= 0.82;
     positions[k] += velocities[k]; positions[k + 1] += velocities[k + 1]; positions[k + 2] += velocities[k + 2];
+    if (positions[k] !== positions[k]) { positions[k] = positions[k + 1] = positions[k + 2] = 0; velocities[k] = velocities[k + 1] = velocities[k + 2] = 0; }   // NaN = نرجّعه للنص
   }
   geometry.attributes.position.needsUpdate = true;
   renderer.render(scene, camera);
 }
 animate();
-window.__face = { updateRoi, updateFacePixels, get roi() { return roi; }, positions, targets, colors };
+window.__face = { updateFace, findTongue, get tongue() { return tonguePts.length; }, positions, targets, colors };
 // للتجربة من الكونسول: نقدر نرسل يد وهمية
 window.__debug = { updateHands, applyControls, drawCursors, H, ctl };
 
 addEventListener("resize", () => {
-  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  camera.aspect = innerWidth / Math.max(1, innerHeight); camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 // للتجربة بدون كاميرا: المسافة أو الأسهم تغيّر الشكل
